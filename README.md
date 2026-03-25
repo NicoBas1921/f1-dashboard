@@ -1,104 +1,77 @@
-"""
-F1 Telemetry Dashboard - FastF1 + Streamlit
-2026 Season Focus | Featured: Franco Colapinto (COL)
-"""
+# F1 Telemetry Dashboard
 
-import os, time, warnings
-warnings.filterwarnings("ignore")
+Un dashboard interactivo para visualizar datos de telemetría de Fórmula 1 usando FastF1 y Streamlit.
 
-import streamlit as st
-import fastf1
-import fastf1.plotting
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import requests
-from datetime import datetime, timezone
+## Características
 
-# --- Cache Setup ---
-BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR = os.path.join(BASE_DIR, "cache")
-os.makedirs(CACHE_DIR, exist_ok=True)
-try:
-    fastf1.enable_cache(CACHE_DIR)
-except AttributeError:
-    fastf1.Cache.enable_cache(CACHE_DIR)
+- **Monitor de Piloto Destacado**: Visualiza estadísticas detalladas de un piloto seleccionado
+- **Torre de Tiempos**: Tabla de posiciones con tiempos de vuelta, sectores y deltas
+- **Mapa del Circuito GPS**: Visualización animada de la posición de los coches en tiempo real
+- **Comparación de Telemetría**: Gráficos de velocidad, acelerador, frenos, RPM y cambios de marcha
+- **Campeonato**: Clasificaciones de pilotos y constructores
+- **Mensajes FIA**: Control de carrera y mensajes de la FIA
+- **Calendario de la Temporada**: Próximas carreras con cuenta regresiva
 
-st.set_page_config(
-    page_title="F1 Dashboard",
-    page_icon="F1",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+## Novedades Recientes
 
-CURRENT_YEAR = datetime.now().year
+- **Selección Dinámica de Pilotos**: El piloto destacado ahora se selecciona de la lista completa de pilotos participantes en la sesión específica, permitiendo elegir a todos los pilotos del año actual en lugar de una lista fija.
 
-# ============================================================
-# CSS
-# ============================================================
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
-html,body,[class*="css"]{font-family:'Inter',sans-serif;}
-section[data-testid="stSidebar"]{background:#080808;border-right:1px solid #1a1a1a;}
-.main .block-container{padding-top:.7rem;max-width:1700px;}
-.f1h{background:linear-gradient(135deg,#0c0c0c,#1a0000 60%,#0c0c0c);
-     border-bottom:3px solid #E10600;padding:12px 22px;margin-bottom:.8rem;
-     border-radius:4px;display:flex;align-items:center;justify-content:space-between;}
-.live-badge{background:#E10600;color:#fff;padding:3px 10px;border-radius:3px;
-            font-size:.65rem;font-weight:700;letter-spacing:.15em;
-            animation:blink 1.2s infinite;}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
-.hist-badge{background:#1a1a1a;color:#555;padding:3px 10px;border-radius:3px;
-            font-size:.65rem;font-weight:700;letter-spacing:.15em;}
-.col-card{background:linear-gradient(135deg,#080810,#0c1220);
-          border:1px solid #1a2a4a;border-left:4px solid #00D2BE;
-          border-radius:5px;padding:12px 16px;margin-bottom:.7rem;}
-.metric-tile{background:#0f0f0f;border:1px solid #1a1a1a;border-radius:5px;
-             padding:11px 12px;text-align:center;margin-bottom:5px;}
-.metric-tile .val{font-family:'JetBrains Mono',monospace;font-size:1.2rem;
-                  font-weight:600;color:#eee;line-height:1;}
-.metric-tile .lbl{color:#3a3a3a;font-size:.6rem;letter-spacing:.14em;
-                  text-transform:uppercase;margin-top:5px;font-weight:500;}
-.sh{color:#3a3a3a;font-size:.63rem;letter-spacing:.22em;font-weight:600;
-    text-transform:uppercase;border-bottom:1px solid #161616;
-    padding-bottom:5px;margin:.8rem 0 .8rem 0;}
-.ib{background:#0c0c0c;border:1px solid #1a1a1a;border-radius:5px;
-    padding:13px 17px;font-size:.8rem;color:#555;line-height:1.7;}
-.ib b{color:#999;}
-.telh{background:#0c0c0c;border:1px solid #161616;border-radius:5px;
-      padding:11px 15px;font-size:.76rem;color:#444;line-height:1.8;margin-bottom:.7rem;}
-.telh b{color:#777;}
-.mdr{display:flex;align-items:center;gap:6px;padding:4px 0;
-     border-bottom:1px solid #111;font-family:'JetBrains Mono',monospace;}
-.mdd{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
-.fiam{background:#0c0c0c;border-left:3px solid #222;border-radius:0 4px 4px 0;
-      padding:7px 11px;margin-bottom:5px;font-size:.76rem;color:#666;line-height:1.5;}
-.fiam.safety{border-left-color:#FFD700;}
-.fiam.penalty{border-left-color:#E10600;}
-.fiam.incident{border-left-color:#FF8C00;}
-.fiam.info{border-left-color:#3671C6;}
-.fialap{color:#333;font-size:.62rem;font-weight:600;text-transform:uppercase;
-        letter-spacing:.1em;margin-bottom:2px;}
-.sc-card{background:#0f0f0f;border:1px solid #1a1a1a;border-radius:5px;
-         padding:13px 15px;margin-bottom:9px;}
-.sc-round{color:#E10600;font-size:.62rem;font-weight:700;letter-spacing:.15em;text-transform:uppercase;}
-.sc-name{color:#ccc;font-size:.92rem;font-weight:600;margin:3px 0;}
-.sc-sess{color:#777;font-size:.7rem;padding:2px 0;}
-.cdbox{background:#0f0f0f;border:1px solid #1a1a1a;border-radius:5px;
-       padding:14px;text-align:center;margin-bottom:10px;}
-.cdval{font-family:'JetBrains Mono',monospace;font-size:1.8rem;font-weight:700;
-       color:#E10600;line-height:1;}
-.cdlbl{color:#333;font-size:.62rem;letter-spacing:.15em;text-transform:uppercase;margin-top:3px;}
-.alert-sc{background:#1e1a00;border:1px solid #FFD700;color:#FFD700;
-          padding:8px 14px;border-radius:4px;margin-bottom:8px;
-          font-size:.78rem;font-weight:600;}
-.alert-red{background:#1e0000;border:1px solid #E10600;color:#FF4444;
-           padding:8px 14px;border-radius:4px;margin-bottom:8px;
-           font-size:.78rem;font-weight:600;}
-</style>
-""", unsafe_allow_html=True)
+## Tecnologías
+
+- **Streamlit**: Framework web para la interfaz
+- **FastF1**: Librería para datos de F1
+- **Plotly**: Gráficos interactivos
+- **Pandas**: Manipulación de datos
+- **Requests**: API para clasificaciones del campeonato
+
+## Instalación
+
+1. Clona el repositorio:
+```bash
+git clone <url-del-repositorio>
+cd f1_dashboard
+```
+
+2. Crea un entorno virtual:
+```bash
+python -m venv .venv
+source .venv/bin/activate  # En Windows: .venv\Scripts\activate
+```
+
+3. Instala las dependencias:
+```bash
+pip install -r requirements.txt
+```
+
+## Uso
+
+Ejecuta la aplicación:
+```bash
+streamlit run app.py
+```
+
+La aplicación se abrirá en tu navegador. Selecciona un Gran Premio y sesión para cargar los datos.
+
+## Estructura del Proyecto
+
+- `app.py`: Archivo principal de la aplicación
+- `requirements.txt`: Dependencias de Python
+- `cache/`: Directorio para cache de datos FastF1
+- `README.md`: Este archivo
+
+## Datos
+
+Los datos se obtienen de:
+- **FastF1**: Telemetría, vueltas, clima, mensajes
+- **Jolpica API**: Clasificaciones del campeonato
+
+## Contribución
+
+Si encuentras errores o tienes sugerencias, por favor abre un issue o envía un pull request.
+
+## Licencia
+
+Este proyecto es de código abierto. Consulta el archivo LICENSE para más detalles.
 
 # ============================================================
 # CONSTANTS

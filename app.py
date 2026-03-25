@@ -282,6 +282,37 @@ def build_driver_positions(session):
 
 
 def build_timing_data(session, stype):
+    # For Race/Sprint: use official results order from session.results
+    # For Quali/Practice: use fastest lap order
+    is_race = stype in ("R", "S")
+
+    # Try to get official race results for ordering
+    race_order = {}   # driver -> finishing position
+    race_status = {}  # driver -> status string (Finished, DNF, DNS, etc.)
+    race_gap = {}     # driver -> gap to leader string
+
+    if is_race:
+        try:
+            results = session.results
+            if results is not None and not results.empty:
+                for _, r in results.iterrows():
+                    drv_abbr = str(r.get("Abbreviation", ""))
+                    pos      = r.get("Position")
+                    status   = str(r.get("Status", ""))
+                    q_str    = str(r.get("Q1","")) # not used here but available
+                    try:
+                        gap = str(r.get("Time","")) if str(r.get("Status","")) == "Finished" else status
+                    except Exception:
+                        gap = ""
+                    try:
+                        race_order[drv_abbr]  = int(pos) if pd.notna(pos) else 99
+                    except Exception:
+                        race_order[drv_abbr]  = 99
+                    race_status[drv_abbr] = status
+                    race_gap[drv_abbr]    = gap
+        except Exception:
+            pass
+
     rows = []
     for drv in session.drivers:
         dlaps = session.laps.pick_drivers(drv)
@@ -293,16 +324,20 @@ def build_timing_data(session, stype):
         except Exception:
             fastest = None
 
-        status = ""
-        try:
-            last = dlaps.iloc[-1]
-            if pd.isna(last.get("LapTime")) and len(dlaps) < 3:
-                status = "DNS"
-            elif pd.isna(last.get("LapTime")) and len(dlaps) >= 3:
-                status = "DNF"
-        except Exception:
-            pass
-
+        # Status: prefer official results for races
+        status = race_status.get(abbr, "")
+        if not status:
+            try:
+                last = dlaps.iloc[-1]
+                if pd.isna(last.get("LapTime")) and len(dlaps) < 3:
+                    status = "DNS"
+                elif pd.isna(last.get("LapTime")) and len(dlaps) >= 3:
+                    status = "DNF"
+            except Exception:
+                pass
+        # Normalize status
+        if status and status not in ("Finished","DNS","DNF","") and not status.startswith("+"):
+            status = "DNF"  # Retired/Accident/etc -> show as DNF
         ms = []
         try:
             if fastest is not None:
@@ -326,36 +361,52 @@ def build_timing_data(session, stype):
             ms = ["w"]*6
 
         rows.append({
-            "Driver":  str(drv),
-            "Number":  num,
-            "Name":    full,
-            "Team":    team,
-            "LapTime": fastest["LapTime"]     if fastest is not None else None,
-            "S1":      fastest["Sector1Time"] if fastest is not None else None,
-            "S2":      fastest["Sector2Time"] if fastest is not None else None,
-            "S3":      fastest["Sector3Time"] if fastest is not None else None,
-            "Speed":   fastest["SpeedI1"]     if fastest is not None else None,
-            "Status":  status,
-            "MS":      ms,
+            "Driver":    str(drv),
+            "Abbr":      abbr,
+            "Number":    num,
+            "Name":      full,
+            "Team":      team,
+            "LapTime":   fastest["LapTime"]     if fastest is not None else None,
+            "S1":        fastest["Sector1Time"] if fastest is not None else None,
+            "S2":        fastest["Sector2Time"] if fastest is not None else None,
+            "S3":        fastest["Sector3Time"] if fastest is not None else None,
+            "Speed":     fastest["SpeedI1"]     if fastest is not None else None,
+            "Status":    status,
+            "MS":        ms,
+            "RacePos":   race_order.get(abbr, 99) if is_race else 99,
+            "RaceGap":   race_gap.get(abbr, "")   if is_race else "",
         })
 
     if not rows:
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
-    df.sort_values("LapTime", inplace=True, na_position="last")
+
+    # Sort: races by finishing position, others by lap time
+    if is_race and any(df["RacePos"] < 99):
+        df.sort_values("RacePos", inplace=True, na_position="last")
+    else:
+        df.sort_values("LapTime", inplace=True, na_position="last")
+
     df.reset_index(drop=True, inplace=True)
     df.insert(0, "Pos", range(1, len(df)+1))
 
+    # Delta: for races use gap from results, for others use lap time delta
     ref = df["LapTime"].iloc[0] if not df.empty else None
-    def delta(lt):
+    def delta(row):
+        if is_race and row.get("RaceGap",""):
+            g = str(row["RaceGap"])
+            if g in ("Finished","") or g.startswith("+"):
+                return g if g.startswith("+") else ("LEADER" if row["Pos"]==1 else g)
+            return g  # Already formatted gap or DNF reason
+        lt = row["LapTime"]
         if lt is None or ref is None: return "--"
         try:
             d = lt.total_seconds() - ref.total_seconds()
             return "LEADER" if d == 0 else f"+{d:.3f}"
         except Exception:
             return "--"
-    df["Delta"] = df["LapTime"].apply(delta)
+    df["Delta"] = df.apply(delta, axis=1)
 
     for sec in ["S1","S2","S3"]:
         valid = df[sec].dropna()
@@ -376,7 +427,9 @@ def check_live_session():
         now = datetime.now(timezone.utc)
         df  = get_schedule_df(now.year)
         if df.empty:
-            return None
+            df = get_schedule_df(now.year - 1)
+            if df.empty:
+                return None
         for _, ev in df.iterrows():
             for i in range(1,6):
                 sdate = ev.get(f"Session{i}Date")
@@ -562,10 +615,11 @@ def build_tel_figure(session, drv1, drv2):
     channels = ["Speed","Throttle","Brake","RPM","nGear"]
     ylabels  = ["Speed (km/h)","Throttle (%)","Brake","RPM","Gear"]
 
+    featured = st.session_state.get("featured_driver", FEATURED_DRIVER)
     n1, _, _, t1 = get_driver_info(drv1, session)
     n2, _, _, t2 = get_driver_info(drv2, session)
-    c1 = FEATURED_COLOR if drv1==FEATURED_DRIVER else tcolor(t1, session)
-    c2 = FEATURED_COLOR if drv2==FEATURED_DRIVER else tcolor(t2, session)
+    c1 = FEATURED_COLOR if drv1 == featured else tcolor(t1, session)
+    c2 = FEATURED_COLOR if drv2 == featured else tcolor(t2, session)
     lbl1 = f"{n1} - {get_driver_info(drv1,session)[1]}"
     lbl2 = f"{n2} - {get_driver_info(drv2,session)[1]}"
 
@@ -609,7 +663,8 @@ def build_lap_chart(session, driver):
     except Exception:
         return go.Figure()
     _, _, _, team = get_driver_info(driver, session)
-    color = FEATURED_COLOR if driver==FEATURED_DRIVER else tcolor(team, session)
+    featured = st.session_state.get("featured_driver", FEATURED_DRIVER)
+    color = FEATURED_COLOR if driver==featured else tcolor(team, session)
     fig = go.Figure()
     if not laps.empty:
         ts = laps["LapTime"].dt.total_seconds()
@@ -640,26 +695,28 @@ def build_lap_chart(session, driver):
 # ============================================================
 
 def render_featured(session):
+    featured = st.session_state.get("featured_driver", FEATURED_DRIVER)
+    
     # Dynamically get team and number from session
     try:
-        col_info = session.get_driver(FEATURED_DRIVER)
-        col_num  = str(col_info.get("DriverNumber", "43"))
-        col_team = str(col_info.get("TeamName", "Alpine"))
+        col_info = session.get_driver(featured)
+        col_num  = str(col_info.get("DriverNumber", "--"))
+        col_team = str(col_info.get("TeamName", "--"))
     except Exception:
-        col_num  = "43"
-        col_team = "Alpine"
+        col_num  = "--"
+        col_team = "--"
 
     st.markdown(f"""
     <div class="col-card">
       <div style="color:#00D2BE;font-size:.88rem;font-weight:700;
                   letter-spacing:.2em;text-transform:uppercase;">
-        Featured Driver Monitor - Franco Colapinto - #{col_num} - {col_team}
+        Featured Driver Monitor - {featured} - #{col_num} - {col_team}
       </div>
     </div>""", unsafe_allow_html=True)
     try:
-        laps = session.laps.pick_drivers(FEATURED_DRIVER)
+        laps = session.laps.pick_drivers(featured)
         if laps.empty:
-            st.info("Colapinto (COL) has no data in this session.")
+            st.info(f"{featured} has no data in this session.")
             return
         qlaps   = laps.pick_quicklaps()
         fastest = laps.pick_fastest() if not laps.empty else None
@@ -786,6 +843,12 @@ def render_timing(session, stype):
 
     is_qual = stype in ("Q","SQ")
 
+    row_limit = st.selectbox(
+        "Show top", [10, 15, len(df)],
+        index=0,
+        format_func=lambda v: "All" if v == len(df) else str(v)
+    )
+
     # Build table using st.dataframe approach to avoid HTML rendering issues
     # We'll use a styled HTML table but wrap each row carefully
     fc_map = {"P":"#CC44FF","G":"#39FF14","Y":"#FFD700"}
@@ -801,9 +864,10 @@ def render_timing(session, stype):
             unsafe_allow_html=True
         )
 
-    for _, row in df.iterrows():
+    for _, row in df.head(row_limit).iterrows():
         pos    = row["Pos"]
-        is_col = row["Driver"] == FEATURED_DRIVER
+        featured = st.session_state.get("featured_driver", FEATURED_DRIVER)
+        is_col = row["Driver"] == featured
         status = str(row.get("Status",""))
         is_qual_elim = is_qual and pos > 10
 
@@ -971,7 +1035,8 @@ def render_telemetry(session, session_key):
         num, full, _, _ = get_driver_info(d, session)
         disp.append(f"{num} - {full}")
 
-    d1i = next((i for i,d in enumerate(all_drivers) if d==FEATURED_DRIVER), 0)
+    featured = st.session_state.get("featured_driver", FEATURED_DRIVER)
+    d1i = next((i for i,d in enumerate(all_drivers) if d==featured), 0)
     d2i = (d1i+1) % len(all_drivers)
 
     c1, c2 = st.columns(2)
@@ -1366,6 +1431,26 @@ def main():
             is_live = False
 
         if is_live:
+            # Featured Driver Selection for Live
+            st.markdown(
+                f'<div style="color:#333;font-size:.6rem;letter-spacing:.1em;'
+                f'margin-bottom:4px;">FEATURED DRIVER</div>',
+                unsafe_allow_html=True)
+            all_drivers_live = list(live_session.drivers)
+            driver_options_live = []
+            for d in all_drivers_live:
+                num, full, _, _ = get_driver_info(d, live_session)
+                driver_options_live.append(f"{num} - {full}")
+            default_index_live = next((i for i, opt in enumerate(driver_options_live) if "COL" in opt), 0)
+            featured_driver_live = st.selectbox(
+                "Pick a driver to follow",
+                driver_options_live,
+                index=default_index_live,
+                label_visibility="collapsed"
+            )
+            selected_code_live = all_drivers_live[driver_options_live.index(featured_driver_live)]
+            st.session_state["featured_driver"] = selected_code_live
+
             t1,t2,t3,t4,t5,t6,t7 = st.tabs([
                 "Live Timing","Live Map","Featured Driver",
                 "FIA Messages","Telemetry","Championship","Schedule",
@@ -1389,7 +1474,13 @@ def main():
         unsafe_allow_html=True)
 
     load_btn    = st.button("Load Session Data", type="primary")
+    refresh_btn = st.button("Refresh Data")
     session_key = f"{year}_{gp}_{stype}"
+
+    if refresh_btn:
+        for key in ["sess_loaded","_session","circuit_xy","driver_pos","map_session_key"]:
+            st.session_state.pop(key, None)
+        st.rerun()
 
     # Reset state when selection changes
     if st.session_state.get("sess_key") != session_key:
@@ -1418,6 +1509,26 @@ def main():
                     return
 
         session = st.session_state["_session"]
+
+        # Featured Driver Selection
+        st.markdown(
+            f'<div style="color:#333;font-size:.6rem;letter-spacing:.1em;'
+            f'margin-bottom:4px;">FEATURED DRIVER</div>',
+            unsafe_allow_html=True)
+        all_drivers = list(session.drivers)
+        driver_options = []
+        for d in all_drivers:
+            num, full, _, _ = get_driver_info(d, session)
+            driver_options.append(f"{num} - {full}")
+        default_index = next((i for i, opt in enumerate(driver_options) if "COL" in opt), 0)
+        featured_driver = st.selectbox(
+            "Pick a driver to follow",
+            driver_options,
+            index=default_index,
+            label_visibility="collapsed"
+        )
+        selected_code = all_drivers[driver_options.index(featured_driver)]
+        st.session_state["featured_driver"] = selected_code
 
         t1,t2,t3,t4,t5,t6,t7 = st.tabs([
             "Featured Driver","Timing Tower","Circuit Map",
