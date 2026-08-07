@@ -1,3 +1,5 @@
+> Estado: proyecto personal en desarrollo. Algunas funcionalidades pueden encontrarse incompletas o sujetas a cambios.
+
 # F1 Telemetry Dashboard
 
 Un dashboard interactivo para visualizar datos de telemetría de Fórmula 1 en tiempo real y histórico, construido con Streamlit y FastF1.
@@ -17,7 +19,7 @@ Un dashboard interactivo para visualizar datos de telemetría de Fórmula 1 en t
 
 1. Clona este repositorio:
    ```bash
-   git clone https://github.com/tu-usuario/f1-dashboard.git
+   git clone https://github.com/NicoBas1921/f1-dashboard.git
    cd f1-dashboard
    ```
 
@@ -66,7 +68,3 @@ La aplicación ahora carga automáticamente todos los drivers participantes en l
 ## Contribución
 
 Si encuentras errores o tienes sugerencias, por favor abre un issue o envía un pull request.
-
-## Licencia
-
-Este proyecto es de código abierto. Consulta el archivo LICENSE para más detalles.
